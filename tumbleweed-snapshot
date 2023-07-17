@@ -11,6 +11,8 @@ SCRIPT_DIR="$(dirname "$SCRIPT")"
 : ${SNAPSHOT_COUNT_MAX:="50"}
 : ${SNAPSHOT_REDIRECT_EXPIRE:="360"}
 
+: ${PH_HIST:=""}
+
 SNAPSHOT_OLDEST=$(date -d "$SNAPSHOT_AGE_MAX" +%Y%m%d)
 LOCKFILE_NAME="$SNAPSHOT_DIR/.lock"
 
@@ -44,6 +46,25 @@ snapshot_check_redirect()
   fi
 }
 
+_snapshot_create_ph()
+(
+    snapshot_latest=$1
+    [ -z "$PH_RUN" ] || PH_IN="$SOURCE_DIR" ph_hist tumbleweed debug/tumbleweed source/tumbleweed | bash
+    ph_last=$(ph_last tumbleweed)
+    mkdir -p $snapshot_latest/tumbleweed/
+    ln -sfn $ph_last/repo $snapshot_latest/tumbleweed/
+    ph_last=$(ph_last debug/tumbleweed)
+    test ! -d $ph_last/repo/ || (
+        mkdir -p $snapshot_latest/debug/tumbleweed/
+        ln -sfn $ph_last/repo/ $snapshot_latest/debug/tumbleweed/
+    )
+    ph_last=$(ph_last source/tumbleweed) || :
+    test ! -d $ph_last/repo/ || (
+        mkdir -p $snapshot_latest/source/tumbleweed/
+        ln -sfn $ph_last/repo/ $snapshot_latest/source/tumbleweed/
+    )
+)
+
 snapshot_create()
 {
   # Snapshot latest (assumes source are fully updated).
@@ -58,7 +79,11 @@ snapshot_create()
     echo "${snapshots[0]}: redirect removed"
 
     # Hardlink against previous snapshot.
-    rsync --include-from "$RSYNC_INCLUDE" -a --delete --link-dest "$(realpath $snapshot_older)" "$SOURCE_DIR/" "$snapshot_latest"
+    if test -z "$PH_HIST"; then
+        rsync --include-from "$RSYNC_INCLUDE" -a --delete --link-dest "$(realpath $snapshot_older)" "$SOURCE_DIR/" "$snapshot_latest"
+    else
+        _snapshot_create_ph $snapshot_latest
+    fi
 
     snapshot_create_rpm_list "$snapshot_latest"
     comm --check-order -23 "$snapshot_latest/rpm.list" "$snapshot_older/rpm.list" > "$snapshot_latest/rpm.unique.list"
@@ -66,7 +91,11 @@ snapshot_create()
     echo "$snapshot: created against ${snapshots[0]}"
   else
     # First snapshot, with no previous base (ie make full copy).
-    rsync --include-from "$RSYNC_INCLUDE" -a --delete "$SOURCE_DIR/" "$snapshot_latest"
+    if test -z "$PH_HIST"; then
+        rsync --include-from "$RSYNC_INCLUDE" -a --delete "$SOURCE_DIR/" "$snapshot_latest"
+    else
+        _snapshot_create_ph $snapshot_latest
+    fi
 
     snapshot_create_rpm_list "$snapshot_latest"
     cp "$snapshot_latest/rpm.list" "$snapshot_latest/rpm.unique.list"
@@ -83,8 +112,10 @@ snapshot_create()
 snapshot_create_rpm_list()
 {
   local snapshot_latest="$1"
-  rsync --recursive --list-only --include-from "$RSYNC_INCLUDE" "$snapshot_latest/" | \
-    grep -oP "[^ ]+\.rpm$" | sort -n > "$snapshot_latest/rpm.list"
+  L=""
+  test -z "$PH_HIST" || L="-L"
+  rsync --recursive $L --list-only --include-from "$RSYNC_INCLUDE" "$snapshot_latest/" | \
+      grep -oP "[^ ]+\.rpm$" | sort -n > "$snapshot_latest/rpm.list"
 }
 
 snapshot_create_disk()
